@@ -1937,6 +1937,8 @@ TEST_CASE("middleware_cors")
     cors
       .prefix("/origin")
         .origin("test.test")
+      .prefix("/auth-origin")
+        .allow_credentials()
       .prefix("/expose")
         .expose("exposed-header")
       .prefix("/nocors")
@@ -1949,6 +1951,11 @@ TEST_CASE("middleware_cors")
     });
 
     CROW_ROUTE(app, "/origin")
+    ([&](const request&) {
+        return "-";
+    });
+
+    CROW_ROUTE(app, "/auth-origin")
     ([&](const request&) {
         return "-";
     });
@@ -1978,6 +1985,10 @@ TEST_CASE("middleware_cors")
     resp = HttpClient::request(LOCALHOST_ADDRESS, port,
                                "GET /origin\r\n\r\n");
     CHECK(resp.find("Access-Control-Allow-Origin: test.test") != std::string::npos);
+
+    resp = HttpClient::request(LOCALHOST_ADDRESS, port,
+                                    "GET /auth-origin\r\nOrigin: test-client\r\n\r\n");
+    CHECK(resp.find("Access-Control-Allow-Origin: test-client") != std::string::npos);
 
     resp = HttpClient::request(LOCALHOST_ADDRESS, port,
                                "GET /expose\r\n\r\n");
@@ -3195,6 +3206,57 @@ TEST_CASE("websocket_subprotocols")
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
         CHECK(connected);
         CHECK(connection->get_subprotocol() == "myprotocol");
+    }
+
+    app.stop();
+}
+
+TEST_CASE("mirror_websocket_subprotocols")
+{
+    static std::string http_message = "GET /ws HTTP/1.1\r\nConnection: keep-alive, Upgrade\r\nupgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: protocol1, protocol2\r\nSec-WebSocket-Version: 13\r\nHost: localhost\r\n\r\n";
+
+    websocket::connection* connection = nullptr;
+    bool connected{false};
+
+    SimpleApp app;
+
+    CROW_WEBSOCKET_ROUTE(app, "/ws")
+      .mirrorprotocols()
+      .onaccept([&](const crow::request& req, void**) {
+          CROW_LOG_INFO << "Accepted websocket with URL " << req.url;
+          return true;
+      })
+      .onopen([&](websocket::connection& con) {
+          connected = true;
+          connection = &con;
+          CROW_LOG_INFO << "Connected websocket and subprotocol is " << con.get_subprotocol();
+      })
+      .onclose([&](websocket::connection&, const std::string&, uint16_t) {
+          CROW_LOG_INFO << "Closing websocket";
+      });
+
+    app.validate();
+
+    auto _ = app.bindaddr(LOCALHOST_ADDRESS).port(45451).run_async();
+    app.wait_for_server_start();
+    asio::io_context ic;
+
+    asio::ip::tcp::socket c(ic);
+    c.connect(asio::ip::tcp::endpoint(
+      asio::ip::make_address(LOCALHOST_ADDRESS), 45451));
+
+
+    char buf[2048];
+
+    //----------Handshake----------
+    {
+        std::fill_n(buf, 2048, 0);
+        c.send(asio::buffer(http_message));
+
+        c.receive(asio::buffer(buf, 2048));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        CHECK(connected);
+        CHECK(connection->get_subprotocol() == "protocol1, protocol2");
     }
 
     app.stop();
